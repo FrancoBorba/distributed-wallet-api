@@ -169,7 +169,6 @@ func (m Money) Add(other Money) (Money, error) {
 
 	sum := m.cents + other.cents
 
-
 	if (other.cents > 0 && sum < m.cents) || (other.cents < 0 && sum > m.cents) {
 		return Money{}, ErrArithmeticOverflow
 	}
@@ -187,7 +186,6 @@ func (m Money) Subtract(other Money) (Money, error) {
 	}
 
 	diff := m.cents - other.cents
-
 
 	if (other.cents < 0 && diff < m.cents) || (other.cents > 0 && diff > m.cents) {
 		return Money{}, ErrArithmeticOverflow
