@@ -27,7 +27,6 @@ import (
 	"strings"
 )
 
-
 const Algorithm = "sha256-canonical-json-v1"
 
 var (
@@ -36,7 +35,6 @@ var (
 	ErrPayloadNotObject = errors.New("payload must be a JSON object")
 	ErrNoBusinessFields = errors.New("payload has no business fields to hash")
 )
-
 
 var transportFields = map[string]struct{}{
 	"idempotencykey":         {},
