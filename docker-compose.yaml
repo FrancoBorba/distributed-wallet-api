@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
 
   postgres:
@@ -19,24 +17,61 @@ services:
       timeout: 5s
       retries: 5
 
-  # 
+  # Schema migrations. This runs once, applies everything that is pending and
+  # exits, which is why the API waits for it to complete rather than to become
+  # healthy. Running it as its own service keeps the application free of any
+  # migration logic at startup, so several instances starting at the same time
+  # cannot race to change the schema.
+  migrate:
+    image: migrate/migrate:v4.17.1
+    container_name: wager_migrate
+    volumes:
+      - ./migrations:/migrations
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://wager_user:wager_password@postgres:5432/wager_db?sslmode=disable"
+      - "up"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+
+  # Identity provider. The realm is imported on the first boot and brings the
+  # clients, the secrets and the test identities with it, so a clean checkout
+  # needs no manual setup in the admin console.
+  #
+  # KC_HOSTNAME_URL fixes the issuer of every token at localhost:8080. Tokens
+  # then say the same thing whether they were requested from the host or from
+  # another container, and the API verifies them against that single value.
   keycloak:
     image: quay.io/keycloak/keycloak:22.0.4
     container_name: wager_keycloak
-    command: start-dev
+    command: ["start-dev", "--import-realm"]
     environment:
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://keycloak_db:5432/keycloak
       KC_DB_USERNAME: keycloak
       KC_DB_PASSWORD: password
+      KC_HOSTNAME_URL: http://localhost:8080
+      KC_HOSTNAME_ADMIN_URL: http://localhost:8080
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
     ports:
       - "8080:8080"
+    volumes:
+      - ./scripts/keycloak:/opt/keycloak/data/import:ro
     depends_on:
-      - keycloak_db
+      keycloak_db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080 && echo -e 'GET /realms/wager HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && cat <&3 | head -n 1 | grep -q '200'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
 
-  # Keycloak DB
   keycloak_db:
     image: postgres:15-alpine
     container_name: keycloak_db
@@ -46,10 +81,17 @@ services:
       POSTGRES_DB: keycloak
     volumes:
       - keycloak_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
-  # Local SQS  
+  # Local SQS. The init script provisions the queues and their redrive policy
+  # as soon as the service is ready, so a fresh start already has
+  # wager-transactions.fifo, wallet-events.fifo and both dead letter queues.
   localstack:
-    image: localstack/localstack:2.3
+    image: localstack/localstack:3.8
     container_name: wager_sqs
     ports:
       - "4566:4566"
@@ -58,6 +100,51 @@ services:
       - DOCKER_HOST=unix:///var/run/docker.sock
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock"
+      - "./scripts/localstack:/etc/localstack/init/ready.d"
+    healthcheck:
+      test: ["CMD-SHELL", "awslocal sqs get-queue-url --queue-name wager-transactions.fifo || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # The service itself. Scale it to run several instances against the same
+  # database and the same queues, which is how the concurrency and recovery
+  # scenarios are exercised:
+  #
+  #   docker compose up -d --scale api=3
+  #
+  # The published range holds up to three instances, one port each.
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgres://wager_user:wager_password@postgres:5432/wager_db?sslmode=disable
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      SQS_INBOUND_QUEUE_URL: http://localstack:4566/000000000000/wager-transactions.fifo
+      SQS_EVENTS_QUEUE_URL: http://localstack:4566/000000000000/wallet-events.fifo
+      OIDC_ENABLED: "true"
+      # The tokens say localhost, because that is what Keycloak was told to
+      # issue, but this container reaches the realm as "keycloak". The issuer
+      # of every token is still checked against OIDC_ISSUER.
+      OIDC_ISSUER: http://localhost:8080/realms/wager
+      OIDC_DISCOVERY_URL: http://keycloak:8080/realms/wager
+      OIDC_AUDIENCE: wallet-api
+      HTTP_ADDRESS: ":8081"
+    ports:
+      - "8081-8083:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   postgres_data:
