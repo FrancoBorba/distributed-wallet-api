@@ -1,0 +1,566 @@
+basePath: /
+consumes:
+- application/json
+definitions:
+  ErrorResponse:
+    properties:
+      code:
+        example: IDEMPOTENCY_CONFLICT
+        type: string
+      message:
+        example: idempotency key was already used with a different payload
+        type: string
+    type: object
+  HealthResponse:
+    properties:
+      checks:
+        additionalProperties:
+          type: string
+        type: object
+      status:
+        enum:
+        - ok
+        - degraded
+        example: ok
+        type: string
+    type: object
+  LedgerEntryResponse:
+    properties:
+      balanceAfter:
+        $ref: '#/definitions/Money'
+      balanceBefore:
+        $ref: '#/definitions/Money'
+      createdAt:
+        example: "2026-09-20T12:00:00Z"
+        type: string
+      direction:
+        enum:
+        - DEBIT
+        - CREDIT
+        example: DEBIT
+        type: string
+      id:
+        type: string
+      money:
+        $ref: '#/definitions/Money'
+      transactionId:
+        type: string
+    type: object
+  LedgerPageResponse:
+    properties:
+      entries:
+        items:
+          $ref: '#/definitions/LedgerEntryResponse'
+        type: array
+      nextCursor:
+        type: string
+      walletId:
+        type: string
+    type: object
+  Money:
+    properties:
+      amount:
+        example: "25.00"
+        type: string
+      currency:
+        example: BRL
+        type: string
+    type: object
+  OpenWalletRequest:
+    properties:
+      initialBalance:
+        $ref: '#/definitions/Money'
+      playerId:
+        example: 0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1
+        type: string
+    type: object
+  ReconciliationResponse:
+    properties:
+      calculatedBalance:
+        $ref: '#/definitions/Money'
+      checkedEntries:
+        example: 2
+        type: integer
+      consistent:
+        example: true
+        type: boolean
+      difference:
+        $ref: '#/definitions/Money'
+      storedBalance:
+        $ref: '#/definitions/Money'
+      walletId:
+        type: string
+    type: object
+  TransactionResponse:
+    properties:
+      createdAt:
+        example: "2026-09-20T12:00:00Z"
+        type: string
+      externalTransactionId:
+        type: string
+      failureCode:
+        type: string
+      gameId:
+        type: string
+      kind:
+        example: BET
+        type: string
+      money:
+        $ref: '#/definitions/Money'
+      playerId:
+        type: string
+      providerId:
+        type: string
+      referenceExternalTransactionId:
+        type: string
+      referenceTransactionId:
+        type: string
+      resultBalance:
+        $ref: '#/definitions/Money'
+      roundId:
+        type: string
+      status:
+        example: PROCESSED
+        type: string
+      transactionId:
+        type: string
+      updatedAt:
+        example: "2026-09-20T12:00:00Z"
+        type: string
+      walletId:
+        type: string
+    type: object
+  WagerRequest:
+    properties:
+      externalTransactionId:
+        example: transaction-123
+        type: string
+      gameId:
+        example: fortune-chimp
+        type: string
+      kind:
+        enum:
+        - BET
+        - WIN
+        - LOSS
+        - REFUND
+        - ROLLBACK
+        example: BET
+        type: string
+      money:
+        $ref: '#/definitions/Money'
+      playerId:
+        example: 0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1
+        type: string
+      providerId:
+        example: provider-a
+        type: string
+      referenceExternalTransactionId:
+        example: ""
+        type: string
+      roundId:
+        example: round-987
+        type: string
+      walletId:
+        example: 0192f291-27dd-7d3f-8071-5f8685deef37
+        type: string
+    type: object
+  WagerResponse:
+    properties:
+      balance:
+        $ref: '#/definitions/Money'
+      failureCode:
+        example: ""
+        type: string
+      idempotentReplay:
+        example: false
+        type: boolean
+      status:
+        enum:
+        - PROCESSED
+        - REJECTED
+        - PENDING_REFERENCE
+        - FAILED
+        example: PROCESSED
+        type: string
+      transactionId:
+        example: 0192f298-345e-7e38-af88-e43f851a819d
+        type: string
+    type: object
+  WalletResponse:
+    properties:
+      balance:
+        $ref: '#/definitions/Money'
+      id:
+        example: 0192f291-27dd-7d3f-8071-5f8685deef37
+        type: string
+      playerId:
+        example: 0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1
+        type: string
+      version:
+        example: 1
+        type: integer
+    type: object
+info:
+  contact: {}
+  description: |-
+    Wallet service for game providers, with equivalent guarantees over HTTP and SQS.
+
+    **Money** always travels as a decimal string with its currency, never as a number.
+
+    **Idempotency**: an operation is identified by (providerId, externalTransactionId). Replaying it returns the stored result with `idempotentReplay: true` and the balance observed when it was originally processed. Reusing the key with a different body is a 409.
+
+    **Status codes**: 200 processed, 202 accepted and waiting for a reference, 400 invalid input, 401 no credential, 403 acting for another provider, 404 not found, 409 idempotency conflict, 422 refused by a business rule with a stable `failureCode`, 503 transient, send it again.
+
+    **Authentication**: every business endpoint requires an OAuth 2.0 bearer token issued by Keycloak through the client_credentials flow. The provider identity comes from the token, never from a header. Wallet operations are restricted to the internal service.
+  title: Distributed Wallet API
+  version: "1.0"
+paths:
+  /health/live:
+    get:
+      description: Reports that the process is running. It touches no dependency,
+        because a restart would not fix a database that is briefly unreachable.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/HealthResponse'
+      summary: Liveness probe
+      tags:
+      - health
+  /health/ready:
+    get:
+      description: Reports whether PostgreSQL and SQS answer. A failure returns 503
+        so the instance stops receiving traffic without being restarted.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/HealthResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/HealthResponse'
+      summary: Readiness probe
+      tags:
+      - health
+  /providers/{providerId}/wagering/transactions/{externalTransactionId}:
+    get:
+      description: Looks the operation up by the identifier the provider gave it,
+        which is how a provider checks the outcome of something it sent without having
+        stored our internal identifier.
+      parameters:
+      - default: provider-a
+        description: Provider
+        in: path
+        name: providerId
+        required: true
+        type: string
+      - description: Identifier given by the provider
+        in: path
+        name: externalTransactionId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/TransactionResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Read a transaction the way the provider knows it
+      tags:
+      - wagering
+  /wagering/transactions:
+    post:
+      consumes:
+      - application/json
+      description: Applies a BET, WIN, LOSS, REFUND or ROLLBACK to a wallet. The Idempotency-Key
+        header is mandatory and is stored as received. Replaying the same key with
+        an equivalent body returns the stored result with idempotentReplay true, and
+        the balance it answers with is the one observed when the operation was originally
+        processed, even if the wallet has moved since. Reusing the key with a different
+        body is a conflict. A reversal whose reference has not arrived yet is accepted
+        and answered with 202, and a worker resolves it later.
+      parameters:
+      - default: provider-a:transaction-123
+        description: Idempotency key, e.g. {providerId}:{externalTransactionId}
+        in: header
+        name: Idempotency-Key
+        required: true
+        type: string
+      - description: Operation
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/WagerRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Processed, or an idempotent replay of a processed operation
+          schema:
+            $ref: '#/definitions/WagerResponse'
+        "202":
+          description: Accepted and waiting for the transaction it reverses
+          schema:
+            $ref: '#/definitions/WagerResponse'
+        "400":
+          description: Invalid input or missing Idempotency-Key
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "401":
+          description: No valid credential
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "403":
+          description: Acting on behalf of another provider
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "409":
+          description: Key reused with a different payload
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "422":
+          description: Refused by a business rule, with a stable failureCode
+          schema:
+            $ref: '#/definitions/WagerResponse'
+        "503":
+          description: Transient unavailability, send the same request again
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Submit a provider operation
+      tags:
+      - wagering
+  /wagering/transactions/{transactionId}:
+    get:
+      description: Lets a provider follow a pending operation and read the failure
+        code of a refused one. A provider only ever sees its own transactions.
+      parameters:
+      - description: Internal transaction identifier
+        in: path
+        name: transactionId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/TransactionResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Read a transaction by its internal identifier
+      tags:
+      - wagering
+  /wallets:
+    post:
+      consumes:
+      - application/json
+      description: Creates the wallet of a player in one currency. A positive initial
+        balance also creates the internal OPENING transaction already processed, its
+        credit entry in the ledger and the corresponding events, all in the same commit.
+        An initial balance of "0.00" creates the wallet alone. The pair (playerId,
+        currency) identifies a wallet, so a second opening is a conflict.
+      parameters:
+      - description: Wallet to open
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/OpenWalletRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/WalletResponse'
+        "400":
+          description: Invalid input
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "403":
+          description: Restricted to the internal service
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "409":
+          description: The player already has a wallet in this currency
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "503":
+          description: Transient unavailability
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Open a wallet
+      tags:
+      - wallets
+  /wallets/{walletId}:
+    get:
+      parameters:
+      - description: Wallet identifier
+        in: path
+        name: walletId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/WalletResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Read a wallet
+      tags:
+      - wallets
+  /wallets/{walletId}/ledger:
+    get:
+      description: 'Returns the immutable entries of a wallet in a stable order. The
+        cursor is opaque: send back the nextCursor of the previous page and do not
+        interpret it. The absence of nextCursor means the last page was reached.'
+      parameters:
+      - description: Wallet identifier
+        in: path
+        name: walletId
+        required: true
+        type: string
+      - description: Opaque cursor of the previous page
+        in: query
+        name: cursor
+        type: string
+      - default: 50
+        description: Page size (1-200)
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/LedgerPageResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Page the wallet history
+      tags:
+      - wallets
+  /wallets/{walletId}/reconciliation:
+    post:
+      description: Rebuilds the balance from every ledger entry, including the opening
+        credit, and compares it with the stored balance in one consistent view of
+        the data. It never changes the balance. A divergence is reported in the response
+        and in the logs.
+      parameters:
+      - description: Wallet identifier
+        in: path
+        name: walletId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/ReconciliationResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Reconcile a wallet against its ledger
+      tags:
+      - wallets
+produces:
+- application/json
+securityDefinitions:
+  BearerAuth:
+    description: Token OAuth 2.0 obtido no Keycloak pelo fluxo client_credentials.
+      Informe "Bearer " seguido do token.
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"
+tags:
+- description: Wallet operations, restricted to the internal service
+  name: wallets
+- description: Provider operations over a wallet
+  name: wagering
+- description: Public liveness and readiness probes
+  name: health
